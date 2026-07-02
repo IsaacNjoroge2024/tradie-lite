@@ -1,0 +1,63 @@
+//@version=5
+indicator("Tradie Lite Scalper — CRT+KillZone+FVG+VWAP", overlay=true, max_bars_back=500)
+
+// ═══ INPUTS ═══
+killZoneOnly = input.bool(true, "Only signal during kill zones")
+struct_lb    = input.int(10, "Structure lookback")
+sweep_lb     = input.int(20, "Liquidity sweep lookback")
+
+// ═══ KILL ZONE (UTC bar time) ═══
+// London 07:00-10:00 UTC | NY 12:00-15:00 UTC | Overlap 12:00-16:00 UTC
+h = hour(time, "UTC")
+inLondon  = h >= 7  and h < 10
+inNY      = h >= 12 and h < 15
+inOverlap = h >= 12 and h < 16
+inKillZone = inLondon or inNY or inOverlap
+killOk = not killZoneOnly or inKillZone
+
+// ═══ EMA + VWAP BIAS ═══
+ema9  = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
+vwapV = ta.vwap(hlc3)
+plot(ema9,  "EMA 9",  color=color.yellow, linewidth=1)
+plot(ema21, "EMA 21", color=color.blue,   linewidth=2)
+plot(vwapV, "VWAP",   color=color.orange, linewidth=2)
+bullBias = ema9 > ema21 and close > vwapV
+bearBias = ema9 < ema21 and close < vwapV
+
+// ═══ RSI ═══
+rsi = ta.rsi(close, 14)
+
+// ═══ MARKET STRUCTURE (BOS) ═══
+swingHigh = ta.highest(high, struct_lb)
+swingLow  = ta.lowest(low,  struct_lb)
+bullBOS = close > swingHigh[1] and close[1] <= swingHigh[1]
+bearBOS = close < swingLow[1]  and close[1] >= swingLow[1]
+plotshape(bullBOS, "BOS Up",   shape.triangleup,   location.belowbar, color.green, size=size.tiny)
+plotshape(bearBOS, "BOS Down", shape.triangledown, location.abovebar, color.red,   size=size.tiny)
+
+// ═══ FVG ═══
+bullFVG = low[0] > high[2]
+bearFVG = high[0] < low[2]
+if bullFVG
+    box.new(bar_index-2, low[0], bar_index, high[2], border_color=color.new(color.green,60), bgcolor=color.new(color.green,88))
+if bearFVG
+    box.new(bar_index-2, high[0], bar_index, low[2], border_color=color.new(color.red,60), bgcolor=color.new(color.red,88))
+
+// ═══ LIQUIDITY SWEEP (condition only — folded into signal, not alerted separately) ═══
+recHigh = ta.highest(high, sweep_lb)[1]
+recLow  = ta.lowest(low,  sweep_lb)[1]
+sweepHigh = high > recHigh and close < recHigh
+sweepLow  = low  < recLow  and close > recLow
+plotshape(sweepHigh, "Sweep H", shape.xcross, location.abovebar, color.purple, size=size.small)
+plotshape(sweepLow,  "Sweep L", shape.xcross, location.belowbar, color.purple, size=size.small)
+
+// ═══ COMPOSITE SIGNAL ═══
+longSig  = killOk and bullBias and rsi > 45 and rsi < 68 and (bullBOS or bullFVG or sweepLow)
+shortSig = killOk and bearBias and rsi < 55 and rsi > 32 and (bearBOS or bearFVG or sweepHigh)
+plotshape(longSig,  "LONG",  shape.labelup,   location.belowbar, color.green, text="BUY",  size=size.normal, textcolor=color.white)
+plotshape(shortSig, "SHORT", shape.labeldown, location.abovebar, color.red,   text="SELL", size=size.normal, textcolor=color.white)
+
+// ═══ ALERTS (two only — sweep is folded into the directional signals) ═══
+alertcondition(longSig,  "Tradie LONG",  "TRADIE LONG {{ticker}} @ {{close}} — run pre-trade check before entry")
+alertcondition(shortSig, "Tradie SHORT", "TRADIE SHORT {{ticker}} @ {{close}} — run pre-trade check before entry")
