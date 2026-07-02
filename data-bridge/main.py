@@ -1,5 +1,7 @@
 import os
 import csv
+import json
+import time
 import requests
 import yfinance as yf
 from datetime import datetime, timedelta, timezone
@@ -40,33 +42,78 @@ def get_price(interval: str = "5m", period: str = "1d"):
             "bars": df.to_dict(orient="records")}
 
 
+CALENDAR_CACHE = os.path.join(os.path.dirname(__file__), "calendar_cache.json")
+CACHE_DURATION = 3600  # 1 hour cache duration
+
+
 @app.get("/calendar")
 def economic_calendar():
-    """Today's high-impact economic events (news filter)."""
-    today = datetime.now(timezone(timedelta(hours=3))).strftime("%Y-%m-%d")
-    if not FINNHUB_KEY or FINNHUB_KEY == "your_finnhub_key_here":
-        return {
-            "date": today, 
-            "high_impact": [], 
-            "all_today": [], 
-            "warning": "Finnhub API key not configured"
-        }
+    """Today's economic events from Forex Factory (free feed with caching)."""
+    eat_tz = timezone(timedelta(hours=3))
+    today_eat = datetime.now(eat_tz)
+    today_str = today_eat.strftime("%Y-%m-%d")
+    
+    data = None
+    
+    # Attempt to read from local cache if it is fresh
+    if os.path.exists(CALENDAR_CACHE):
+        mtime = os.path.getmtime(CALENDAR_CACHE)
+        if time.time() - mtime < CACHE_DURATION:
+            try:
+                with open(CALENDAR_CACHE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                pass
+                
+    # Fetch fresh data if cache is missing or expired
+    if not data:
+        try:
+            url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+            r = requests.get(url, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+            
+            # Update local cache file
+            with open(CALENDAR_CACHE, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except Exception as e:
+            # Fallback to stale cache if web request fails
+            if os.path.exists(CALENDAR_CACHE):
+                try:
+                    with open(CALENDAR_CACHE, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    pass
+            if not data:
+                return {
+                    "date": today_str,
+                    "high_impact": [],
+                    "all_today": [],
+                    "error": f"Failed to fetch calendar and no cache available: {str(e)}"
+                }
+                
+    todays = []
+    high = []
+    
+    for e in data:
+        date_str = e.get("date")
+        if not date_str:
+            continue
+        event_dt = datetime.fromisoformat(date_str)
+        event_eat = event_dt.astimezone(eat_tz)
         
-    try:
-        url = f"https://finnhub.io/api/v1/calendar/economic?token={FINNHUB_KEY}"
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        data = r.json().get("economicCalendar", [])
-        todays = [e for e in data if e.get("time", "").startswith(today)]
-        high = [e for e in todays if str(e.get("impact")) in ("high", "3")]
-        return {"date": today, "high_impact": high, "all_today": todays}
-    except Exception as e:
-        return {
-            "date": today, 
-            "high_impact": [], 
-            "all_today": [], 
-            "error": str(e)
-        }
+        if event_eat.strftime("%Y-%m-%d") == today_str:
+            event_mapped = {
+                "event": e.get("title"),
+                "time": event_eat.strftime("%Y-%m-%d %H:%M EAT"),
+                "impact": e.get("impact"),
+                "country": e.get("country")
+            }
+            todays.append(event_mapped)
+            if e.get("impact") == "High":
+                high.append(event_mapped)
+                
+    return {"date": today_str, "high_impact": high, "all_today": todays}
 
 
 @app.get("/news")

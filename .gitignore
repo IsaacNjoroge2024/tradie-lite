@@ -5,3 +5,10 @@ node_modules/
 tradingview-mcp/
 .venv/
 data-bridge/trades.csv
+
+# Ignore all markdown files except README.md
+**/*.md
+!**/README.md
+
+# Ignore local calendar cache
+data-bridge/calendar_cache.json

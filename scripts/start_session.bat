@@ -5,9 +5,9 @@ echo Starting Tradie Lite session...
 call "%~dp0launch_tradingview_debug.bat"
 
 :: Start data bridge in a new window
-start cmd /k "call \"%~dp0start_data_bridge.bat\""
+start "Tradie Lite Data Bridge" cmd /k call "%~dp0start_data_bridge.bat"
 
 :: Start Claude Code
-start cmd /k "claude"
+start "Claude Code" cmd /k claude
 
 echo Tradie Lite is ready. Open TradingView (in debug browser) and Claude Code.

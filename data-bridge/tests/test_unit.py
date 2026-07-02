@@ -85,34 +85,24 @@ def test_economic_calendar(mock_get):
     # Nairobi timezone (UTC+3)
     today_str = dt.datetime.now(dt.timezone(dt.timedelta(hours=3))).strftime("%Y-%m-%d")
     
-    # Setup mock HTTP response for Finnhub
+    # Setup mock HTTP response for Forex Factory feed
     mock_response = MagicMock()
-    mock_response.json.return_value = {
-        "economicCalendar": [
-            {"time": f"{today_str} 15:30:00", "impact": "high", "event": "US NFP"},
-            {"time": f"{today_str} 10:00:00", "impact": "low", "event": "EU CPI"},
-            {"time": "2026-07-01 12:00:00", "impact": "high", "event": "Yesterday high news"}
-        ]
-    }
+    mock_response.json.return_value = [
+        {"title": "US NFP", "country": "USD", "date": f"{today_str}T08:30:00-04:00", "impact": "High"},
+        {"title": "EU CPI", "country": "EUR", "date": f"{today_str}T03:00:00-04:00", "impact": "Low"},
+        {"title": "Yesterday high news", "country": "USD", "date": "2026-07-01T12:00:00-04:00", "impact": "High"}
+    ]
     mock_get.return_value = mock_response
     
-    # Temporarily set API key
-    with patch("main.FINNHUB_KEY", "mock_key"):
-        res = main.economic_calendar()
-        assert res["date"] == today_str
-        assert len(res["high_impact"]) == 1
-        assert res["high_impact"][0]["event"] == "US NFP"
-        assert len(res["all_today"]) == 2
+    res = main.economic_calendar()
+    assert res["date"] == today_str
+    assert len(res["high_impact"]) == 1
+    assert res["high_impact"][0]["event"] == "US NFP"
+    assert len(res["all_today"]) == 2
         
-    # Test missing key case
-    with patch("main.FINNHUB_KEY", "your_finnhub_key_here"):
-        res = main.economic_calendar()
-        assert "warning" in res
-        assert len(res["high_impact"]) == 0
-        
-    # Test exception case
+    # Test exception case when no cache is available
     mock_get.side_effect = Exception("HTTP Timeout")
-    with patch("main.FINNHUB_KEY", "mock_key"):
+    with patch("main.os.path.exists", return_value=False):
         res = main.economic_calendar()
         assert "error" in res
 
