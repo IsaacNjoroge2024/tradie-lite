@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 import datetime as dt
 from unittest.mock import MagicMock, patch
+from pydantic import ValidationError
 
 # Ensure the parent directory is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -124,3 +125,67 @@ def test_forex_news(mock_get):
         res = main.forex_news()
         assert "warning" in res
         assert len(res["headlines"]) == 0
+
+
+def test_trade_model_validation():
+    # 1. Valid LONG trade
+    t_long = main.Trade(direction="LONG", entry=1.0850, sl=1.0825, tp=1.0900, setup="FVG")
+    assert t_long.direction == "LONG"
+    
+    # 2. Valid SHORT trade
+    t_short = main.Trade(direction="SHORT", entry=1.0800, sl=1.0830, tp=1.0740, setup="Sweep")
+    assert t_short.direction == "SHORT"
+    
+    # 3. Invalid direction
+    with pytest.raises(ValidationError):
+        main.Trade(direction="UP", entry=1.0850, sl=1.0825, tp=1.0900, setup="FVG")
+        
+    # 4. Negative values
+    with pytest.raises(ValidationError):
+        main.Trade(direction="LONG", entry=-1.0850, sl=1.0825, tp=1.0900, setup="FVG")
+        
+    # 5. Invalid LONG SL (SL >= entry)
+    with pytest.raises(ValidationError):
+        main.Trade(direction="LONG", entry=1.0850, sl=1.0860, tp=1.0900, setup="FVG")
+        
+    # 6. Invalid LONG TP (TP <= entry)
+    with pytest.raises(ValidationError):
+        main.Trade(direction="LONG", entry=1.0850, sl=1.0825, tp=1.0840, setup="FVG")
+        
+    # 7. Invalid SHORT SL (SL <= entry)
+    with pytest.raises(ValidationError):
+        main.Trade(direction="SHORT", entry=1.0800, sl=1.0790, tp=1.0740, setup="Sweep")
+        
+    # 8. Invalid SHORT TP (TP >= entry)
+    with pytest.raises(ValidationError):
+        main.Trade(direction="SHORT", entry=1.0800, sl=1.0830, tp=1.0810, setup="Sweep")
+
+
+@patch("main.requests.get")
+def test_forex_news_exception(mock_get):
+    mock_get.side_effect = Exception("Connection Timeout")
+    with patch("main.FINNHUB_KEY", "mock_key"):
+        res = main.forex_news()
+        assert len(res["headlines"]) == 0
+        assert "error" in res
+        assert "Failed to fetch news" in res["error"]
+
+
+@patch("main.requests.get")
+def test_economic_calendar_skips_malformed_date(mock_get):
+    # Nairobi timezone (UTC+3)
+    today_str = dt.datetime.now(dt.timezone(dt.timedelta(hours=3))).strftime("%Y-%m-%d")
+    
+    mock_response = MagicMock()
+    mock_response.json.return_value = [
+        {"title": "Valid Event", "country": "USD", "date": f"{today_str}T08:30:00-04:00", "impact": "High"},
+        {"title": "Malformed Event", "country": "EUR", "date": "invalid-date-format", "impact": "Low"}
+    ]
+    mock_get.return_value = mock_response
+    
+    # Force mock_get to run (avoiding cache hits by patching os.path.exists to return False)
+    with patch("main.os.path.exists", return_value=False):
+        res = main.economic_calendar()
+        assert res["date"] == today_str
+        assert len(res["all_today"]) == 1
+        assert res["all_today"][0]["event"] == "Valid Event"

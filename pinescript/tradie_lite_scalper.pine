@@ -1,10 +1,10 @@
 //@version=5
-indicator("Tradie Lite Scalper — CRT+KillZone+FVG+VWAP", overlay=true, max_bars_back=500)
+indicator("Tradie Lite Scalper — CRT+KillZone+FVG+VWAP", overlay=true, max_bars_back=500, max_boxes_count=200)
 
 // ═══ INPUTS ═══
 killZoneOnly = input.bool(true, "Only signal during kill zones")
-struct_lb    = input.int(10, "Structure lookback")
-sweep_lb     = input.int(20, "Liquidity sweep lookback")
+struct_lb    = input.int(10, "Structure lookback", minval=1, maxval=500)
+sweep_lb     = input.int(20, "Liquidity sweep lookback", minval=1, maxval=500)
 
 // ═══ KILL ZONE (UTC bar time) ═══
 // London 07:00-10:00 UTC | NY 12:00-15:00 UTC | Overlap 12:00-16:00 UTC

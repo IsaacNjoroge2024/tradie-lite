@@ -12,3 +12,8 @@ data-bridge/trades.csv
 
 # Ignore local calendar cache
 data-bridge/calendar_cache.json
+
+# Ignore local IDE/test cache & credentials config
+.claude/
+.pytest_cache/
+claude-config/mcp.json

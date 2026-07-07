@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [ main, master ]
 
+permissions:
+  contents: read
+
 jobs:
   python-test:
     name: Python Data-Bridge Tests
@@ -13,6 +16,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        persist-credentials: false
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -36,10 +41,14 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        persist-credentials: false
 
     - name: Clone TradingView MCP repository
       run: |
         git clone https://github.com/tradesdontlie/tradingview-mcp.git tradingview-mcp
+        cd tradingview-mcp
+        git checkout 4795784a19dd64ff4e2649d2499a536b01bd2d68
 
     - name: Set up Node.js
       uses: actions/setup-node@v4

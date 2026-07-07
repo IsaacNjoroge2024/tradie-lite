@@ -2,14 +2,22 @@ import os
 import csv
 import json
 import time
+import logging
 import requests
 import yfinance as yf
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator, model_validator
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Setup logger
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("tradie-lite-bridge")
 
 app = FastAPI(title="Tradie Lite Data Bridge")
 
@@ -26,7 +34,12 @@ def health():
 @app.get("/price")
 def get_price(interval: str = "5m", period: str = "1d"):
     """OHLCV bars. interval: 1m,5m,15m,1h. period: 1d,5d."""
-    df = yf.Ticker(YF_SYMBOL).history(period=period, interval=interval)
+    try:
+        df = yf.Ticker(YF_SYMBOL).history(period=period, interval=interval)
+    except Exception as e:
+        logger.error(f"Error fetching yfinance history for {YF_SYMBOL}: {str(e)}")
+        return {"error": f"Failed to fetch market data: {type(e).__name__}", "symbol": YF_SYMBOL}
+        
     if df.empty:
         return {"error": "no data", "symbol": YF_SYMBOL}
     
@@ -62,8 +75,8 @@ def economic_calendar():
             try:
                 with open(CALENDAR_CACHE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-            except Exception:
-                pass
+            except Exception as ex:
+                logger.warning(f"Failed to read fresh calendar cache: {str(ex)}")
                 
     # Fetch fresh data if cache is missing or expired
     if not data:
@@ -77,13 +90,14 @@ def economic_calendar():
             with open(CALENDAR_CACHE, "w", encoding="utf-8") as f:
                 json.dump(data, f)
         except Exception as e:
+            logger.warning(f"Failed to fetch fresh calendar, attempting stale cache fallback: {str(e)}")
             # Fallback to stale cache if web request fails
             if os.path.exists(CALENDAR_CACHE):
                 try:
                     with open(CALENDAR_CACHE, "r", encoding="utf-8") as f:
                         data = json.load(f)
-                except Exception:
-                    pass
+                except Exception as ex:
+                    logger.warning(f"Failed to read stale calendar cache: {str(ex)}")
             if not data:
                 return {
                     "date": today_str,
@@ -99,8 +113,12 @@ def economic_calendar():
         date_str = e.get("date")
         if not date_str:
             continue
-        event_dt = datetime.fromisoformat(date_str)
-        event_eat = event_dt.astimezone(eat_tz)
+        try:
+            event_dt = datetime.fromisoformat(date_str)
+            event_eat = event_dt.astimezone(eat_tz)
+        except (ValueError, TypeError) as ex:
+            logger.warning(f"Skipping malformed calendar event date '{date_str}': {str(ex)}")
+            continue
         
         if event_eat.strftime("%Y-%m-%d") == today_str:
             event_mapped = {
@@ -125,12 +143,14 @@ def forex_news():
         }
         
     try:
-        url = f"https://finnhub.io/api/v1/news?category=forex&token={FINNHUB_KEY}"
-        r = requests.get(url, timeout=10)
+        url = "https://finnhub.io/api/v1/news?category=forex"
+        headers = {"X-Finnhub-Token": FINNHUB_KEY}
+        r = requests.get(url, headers=headers, timeout=10)
         r.raise_for_status()
         return {"headlines": r.json()[:10]}
     except Exception as e:
-        return {"headlines": [], "error": str(e)}
+        logger.error(f"Error fetching Finnhub news: {str(e)}")
+        return {"headlines": [], "error": f"Failed to fetch news: {type(e).__name__}"}
 
 
 @app.get("/session")
@@ -163,6 +183,36 @@ class Trade(BaseModel):
     result_pips: float = 0.0
     result_usd: float = 0.0
     notes: str = ""
+
+    @field_validator("direction")
+    @classmethod
+    def validate_direction(cls, v: str) -> str:
+        d = v.upper().strip()
+        if d not in ("LONG", "SHORT"):
+            raise ValueError("direction must be 'LONG' or 'SHORT'")
+        return d
+
+    @field_validator("entry", "sl", "tp")
+    @classmethod
+    def validate_positive(cls, v: float) -> float:
+        if v <= 0.0:
+            raise ValueError("Value must be strictly positive")
+        return v
+
+    @model_validator(mode="after")
+    def validate_trade_relationships(self) -> 'Trade':
+        direction = self.direction.upper()
+        if direction == "LONG":
+            if self.sl >= self.entry:
+                raise ValueError("For LONG trade, Stop Loss must be less than Entry price")
+            if self.tp <= self.entry:
+                raise ValueError("For LONG trade, Take Profit must be greater than Entry price")
+        elif direction == "SHORT":
+            if self.sl <= self.entry:
+                raise ValueError("For SHORT trade, Stop Loss must be greater than Entry price")
+            if self.tp >= self.entry:
+                raise ValueError("For SHORT trade, Take Profit must be less than Entry price")
+        return self
 
 
 @app.post("/log-trade")

@@ -6,7 +6,7 @@
     "test:unit": "npm run test:unit --prefix tradingview-mcp",
     "test:bridge": "pytest data-bridge",
     "test:all": "npm run test:unit && pytest data-bridge",
-    "test:mcp": "npm run test:unit --prefix tradingview-mcp",
+    "test:mcp": "npm run test:unit",
     "install:mcp": "npm install --prefix tradingview-mcp"
   }
 }
