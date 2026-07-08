@@ -61,6 +61,10 @@ def test_get_price(mock_yf_ticker):
         "Close": [1.0855] * 60,
         "Volume": [100] * 60
     }
+    # Inject NaN values to test serialization handling
+    mock_data["High"][0] = np.nan
+    mock_data["Volume"][5] = np.nan
+    
     dates = pd.date_range(start="2026-07-02 09:00:00", periods=60, freq="5min", tz="UTC", name="Datetime")
     mock_df = pd.DataFrame(mock_data, index=dates)
     
@@ -72,7 +76,14 @@ def test_get_price(mock_yf_ticker):
     assert "bars" in res
     assert res["symbol"] == main.YF_SYMBOL
     assert len(res["bars"]) == 60
+    
+    # Assert NaN values got replaced with None
+    assert res["bars"][0]["high"] is None
+    assert res["bars"][5]["volume"] is None
+    
+    # Assert normal values remain floats (NOT converted to strings)
     assert res["bars"][0]["open"] == 1.0850
+    assert isinstance(res["bars"][0]["open"], float)
     assert "date" in res["bars"][0] or "datetime" in res["bars"][0]
     
     # Test empty dataframe case

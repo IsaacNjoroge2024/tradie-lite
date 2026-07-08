@@ -10,6 +10,14 @@ def mock_trades_csv(monkeypatch, tmp_path):
     monkeypatch.setattr(main, "TRADES_CSV", str(temp_csv))
     return temp_csv
 
+@pytest.fixture(autouse=True)
+def mock_calendar_cache(monkeypatch, tmp_path):
+    # Route main.CALENDAR_CACHE to a temporary file path to isolate tests
+    temp_cache = tmp_path / "test_calendar_cache.json"
+    import main
+    monkeypatch.setattr(main, "CALENDAR_CACHE", str(temp_cache))
+    return temp_cache
+
 @pytest.fixture
 def client():
     import main

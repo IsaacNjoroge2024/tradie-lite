@@ -51,6 +51,9 @@ def get_price(interval: str = "5m", period: str = "1d"):
         if df[col].dtype == 'object' or 'datetime' in str(df[col].dtype):
             df[col] = df[col].astype(str)
             
+    # Replace NaN with None so they serialize to null in JSON instead of raising ValueError
+    df = df.astype(object).where(df.notnull(), None)
+            
     return {"symbol": YF_SYMBOL, "interval": interval,
             "bars": df.to_dict(orient="records")}
 
