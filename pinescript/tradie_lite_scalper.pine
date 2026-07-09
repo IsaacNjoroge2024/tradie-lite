@@ -36,13 +36,26 @@ bearBOS = close < swingLow[1]  and close[1] >= swingLow[1]
 plotshape(bullBOS, "BOS Up",   shape.triangleup,   location.belowbar, color.green, size=size.tiny)
 plotshape(bearBOS, "BOS Down", shape.triangledown, location.abovebar, color.red,   size=size.tiny)
 
-// ═══ FVG ═══
+// ═══ FVG + EQUILIBRIUM (50% level) ═══
 bullFVG = low[0] > high[2]
 bearFVG = high[0] < low[2]
+
+// Equilibrium = midpoint of the FVG box — tighter, higher-quality entry zone
+var float bullFVG_eq = na
+var float bearFVG_eq = na
+
 if bullFVG
+    bullFVG_eq := (low[0] + high[2]) / 2
     box.new(bar_index-2, low[0], bar_index, high[2], border_color=color.new(color.green,60), bgcolor=color.new(color.green,88))
+    line.new(bar_index-2, bullFVG_eq, bar_index+10, bullFVG_eq, color=color.new(color.lime,20), style=line.style_dashed, width=1)
 if bearFVG
+    bearFVG_eq := (high[0] + low[2]) / 2
     box.new(bar_index-2, high[0], bar_index, low[2], border_color=color.new(color.red,60), bgcolor=color.new(color.red,88))
+    line.new(bar_index-2, bearFVG_eq, bar_index+10, bearFVG_eq, color=color.new(color.orange,20), style=line.style_dashed, width=1)
+
+// Has price actually retraced to/through the 50% equilibrium level (not just anywhere in the box)?
+bullEqTouch = not na(bullFVG_eq) and low <= bullFVG_eq and close > bullFVG_eq
+bearEqTouch = not na(bearFVG_eq) and high >= bearFVG_eq and close < bearFVG_eq
 
 // ═══ LIQUIDITY SWEEP (condition only — folded into signal, not alerted separately) ═══
 recHigh = ta.highest(high, sweep_lb)[1]
@@ -52,12 +65,12 @@ sweepLow  = low  < recLow  and close > recLow
 plotshape(sweepHigh, "Sweep H", shape.xcross, location.abovebar, color.purple, size=size.small)
 plotshape(sweepLow,  "Sweep L", shape.xcross, location.belowbar, color.purple, size=size.small)
 
-// ═══ COMPOSITE SIGNAL ═══
-longSig  = killOk and bullBias and rsi > 45 and rsi < 68 and (bullBOS or bullFVG or sweepLow)
-shortSig = killOk and bearBias and rsi < 55 and rsi > 32 and (bearBOS or bearFVG or sweepHigh)
+// ═══ COMPOSITE SIGNAL (now requires the FVG equilibrium retest, not just BOS/sweep OR FVG) ═══
+longSig  = killOk and bullBias and rsi > 45 and rsi < 68 and bullEqTouch and (bullBOS or sweepLow)
+shortSig = killOk and bearBias and rsi < 55 and rsi > 32 and bearEqTouch and (bearBOS or sweepHigh)
 plotshape(longSig,  "LONG",  shape.labelup,   location.belowbar, color.green, text="BUY",  size=size.normal, textcolor=color.white)
 plotshape(shortSig, "SHORT", shape.labeldown, location.abovebar, color.red,   text="SELL", size=size.normal, textcolor=color.white)
 
 // ═══ ALERTS (two only — sweep is folded into the directional signals) ═══
-alertcondition(longSig,  "Tradie LONG",  "TRADIE LONG {{ticker}} @ {{close}} — run pre-trade check before entry")
-alertcondition(shortSig, "Tradie SHORT", "TRADIE SHORT {{ticker}} @ {{close}} — run pre-trade check before entry")
+alertcondition(longSig,  "Tradie LONG",  "TRADIE LONG {{ticker}} @ {{close}} — equilibrium retest confirmed — run pre-trade check before entry")
+alertcondition(shortSig, "Tradie SHORT", "TRADIE SHORT {{ticker}} @ {{close}} — equilibrium retest confirmed — run pre-trade check before entry")
