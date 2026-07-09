@@ -6,12 +6,12 @@ killZoneOnly = input.bool(true, "Only signal during kill zones")
 struct_lb    = input.int(10, "Structure lookback", minval=1, maxval=500)
 sweep_lb     = input.int(20, "Liquidity sweep lookback", minval=1, maxval=500)
 
-// ═══ KILL ZONE (UTC bar time) ═══
-// London 07:00-10:00 UTC | NY 12:00-15:00 UTC | Overlap 12:00-16:00 UTC
+// ═══ KILL ZONE (UTC bar time aligned with Nairobi EAT UTC+3) ═══
+// London 09:00-12:00 EAT (06:00-09:00 UTC) | NY 14:00-17:00 EAT (11:00-14:00 UTC) | Overlap 15:00-18:00 EAT (12:00-15:00 UTC)
 h = hour(time, "UTC")
-inLondon  = h >= 7  and h < 10
-inNY      = h >= 12 and h < 15
-inOverlap = h >= 12 and h < 16
+inLondon  = h >= 6  and h < 9
+inNY      = h >= 11 and h < 14
+inOverlap = h >= 12 and h < 15
 inKillZone = inLondon or inNY or inOverlap
 killOk = not killZoneOnly or inKillZone
 
