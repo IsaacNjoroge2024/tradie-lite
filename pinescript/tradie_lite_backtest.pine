@@ -1,0 +1,111 @@
+//@version=5
+strategy("Tradie Lite Backtest — CRT+KillZone+FVG+VWAP", overlay=true,
+     initial_capital=500, default_qty_type=strategy.percent_of_equity,
+     default_qty_value=1, commission_type=strategy.commission.percent,
+     commission_value=0.0, slippage=2, max_bars_back=500)
+
+// ═══ INPUTS (identical to the live indicator, plus backtest-only params) ═══
+killZoneOnly = input.bool(true, "Only signal during kill zones")
+struct_lb    = input.int(10, "Structure lookback", minval=1, maxval=500)
+sweep_lb     = input.int(20, "Liquidity sweep lookback", minval=1, maxval=500)
+slBufferPips = input.float(3.0, "SL buffer beyond sweep extreme (pips)")
+plannedR     = input.float(2.0, "Planned R multiple (TP distance = R x SL distance)")
+maxSlPips    = input.float(50.0, "Max SL distance allowed (pips) — skip if wider")
+
+pip = syminfo.mintick * 10  // approx pip size for a 5-digit FX symbol
+
+// ═══ KILL ZONE (UTC bar time aligned with Nairobi EAT UTC+3) ═══
+// London 09:00-12:00 EAT (06:00-09:00 UTC) | NY 14:00-17:00 EAT (11:00-14:00 UTC) | Overlap 15:00-18:00 EAT (12:00-15:00 UTC)
+h = hour(time, "UTC")
+inLondon  = h >= 6  and h < 9
+inNY      = h >= 11 and h < 14
+inOverlap = h >= 12 and h < 15
+inKillZone = inLondon or inNY or inOverlap
+killOk = not killZoneOnly or inKillZone
+
+// ═══ EMA + VWAP BIAS ═══
+ema9  = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
+vwapV = ta.vwap(hlc3)
+plot(ema9,  "EMA 9",  color=color.yellow, linewidth=1)
+plot(ema21, "EMA 21", color=color.blue,   linewidth=2)
+plot(vwapV, "VWAP",   color=color.orange, linewidth=2)
+bullBias = ema9 > ema21 and close > vwapV
+bearBias = ema9 < ema21 and close < vwapV
+
+// ═══ RSI ═══
+rsi = ta.rsi(close, 14)
+
+// ═══ MARKET STRUCTURE (BOS) ═══
+swingHigh = ta.highest(high, struct_lb)
+swingLow  = ta.lowest(low,  struct_lb)
+bullBOS = close > swingHigh[1] and close[1] <= swingHigh[1]
+bearBOS = close < swingLow[1]  and close[1] >= swingLow[1]
+plotshape(bullBOS, "BOS Up",   shape.triangleup,   location.belowbar, color.green, size=size.tiny)
+plotshape(bearBOS, "BOS Down", shape.triangledown, location.abovebar, color.red,   size=size.tiny)
+
+// ═══ FVG + EQUILIBRIUM (50% level) ═══
+bullFVG = low[0] > high[2]
+bearFVG = high[0] < low[2]
+
+// Equilibrium = midpoint of the FVG box — tighter, higher-quality entry zone
+var float bullFVG_eq = na
+var float bearFVG_eq = na
+
+if bullFVG
+    bullFVG_eq := (low[0] + high[2]) / 2
+    box.new(bar_index-2, low[0], bar_index, high[2], border_color=color.new(color.green,60), bgcolor=color.new(color.green,88))
+    line.new(bar_index-2, bullFVG_eq, bar_index+10, bullFVG_eq, color=color.new(color.lime,20), style=line.style_dashed, width=1)
+if bearFVG
+    bearFVG_eq := (high[0] + low[2]) / 2
+    box.new(bar_index-2, high[0], bar_index, low[2], border_color=color.new(color.red,60), bgcolor=color.new(color.red,88))
+    line.new(bar_index-2, bearFVG_eq, bar_index+10, bearFVG_eq, color=color.new(color.orange,20), style=line.style_dashed, width=1)
+
+// Has price actually retraced to/through the 50% equilibrium level (not just anywhere in the box)?
+bullEqTouch = not na(bullFVG_eq) and low <= bullFVG_eq and close > bullFVG_eq
+bearEqTouch = not na(bearFVG_eq) and high >= bearFVG_eq and close < bearFVG_eq
+
+// ═══ LIQUIDITY SWEEP ═══
+recHigh = ta.highest(high, sweep_lb)[1]
+recLow  = ta.lowest(low,  sweep_lb)[1]
+sweepHigh = high > recHigh and close < recHigh
+sweepLow  = low  < recLow  and close > recLow
+plotshape(sweepHigh, "Sweep H", shape.xcross, location.abovebar, color.purple, size=size.small)
+plotshape(sweepLow,  "Sweep L", shape.xcross, location.belowbar, color.purple, size=size.small)
+
+// Track the sweep extreme for SL placement
+var float lastSweepLowExtreme  = na
+var float lastSweepHighExtreme = na
+if sweepLow
+    lastSweepLowExtreme := low
+if sweepHigh
+    lastSweepHighExtreme := high
+
+// ═══ COMPOSITE SIGNAL (identical gating to the live indicator) ═══
+longSig  = killOk and bullBias and rsi > 45 and rsi < 68 and bullEqTouch and (bullBOS or sweepLow)
+shortSig = killOk and bearBias and rsi < 55 and rsi > 32 and bearEqTouch and (bearBOS or sweepHigh)
+
+// ═══ SL/TP CALCULATION (mirrors the manual rule from TL-01: SL beyond
+//     sweep extreme, capped at maxSlPips; TP at plannedR x SL distance) ═══
+longSlPrice  = not na(lastSweepLowExtreme)  ? lastSweepLowExtreme - slBufferPips * pip : na
+shortSlPrice = not na(lastSweepHighExtreme) ? lastSweepHighExtreme + slBufferPips * pip : na
+
+longSlPips  = not na(longSlPrice)  ? (close - longSlPrice) / pip  : na
+shortSlPips = not na(shortSlPrice) ? (shortSlPrice - close) / pip : na
+
+longSlOk  = not na(longSlPips)  and longSlPips  > 0 and longSlPips  <= maxSlPips
+shortSlOk = not na(shortSlPips) and shortSlPips > 0 and shortSlPips <= maxSlPips
+
+// ═══ ENTRIES/EXITS ═══
+if longSig and longSlOk and strategy.position_size == 0
+    tpPrice = close + (close - longSlPrice) * plannedR
+    strategy.entry("LONG", strategy.long)
+    strategy.exit("LONG TP/SL", from_entry="LONG", stop=longSlPrice, limit=tpPrice)
+
+if shortSig and shortSlOk and strategy.position_size == 0
+    tpPrice = close - (shortSlPrice - close) * plannedR
+    strategy.entry("SHORT", strategy.short)
+    strategy.exit("SHORT TP/SL", from_entry="SHORT", stop=shortSlPrice, limit=tpPrice)
+
+plotshape(longSig,  "LONG",  shape.labelup,   location.belowbar, color.green, text="BUY",  size=size.normal, textcolor=color.white)
+plotshape(shortSig, "SHORT", shape.labeldown, location.abovebar, color.red,   text="SELL", size=size.normal, textcolor=color.white)
