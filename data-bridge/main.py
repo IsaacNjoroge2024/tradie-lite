@@ -245,6 +245,78 @@ class Trade(BaseModel):
         return self
 
 
+def _ensure_csv_file():
+    """Ensure TRADES_CSV exists with current FIELDNAMES header. If an older
+    CSV with different headers is found, back it up and migrate existing rows
+    to the new schema without deleting any historical trade data."""
+    if not os.path.exists(TRADES_CSV):
+        with open(TRADES_CSV, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=FIELDNAMES)
+            w.writeheader()
+        return
+
+    try:
+        with open(TRADES_CSV, "r", encoding="utf-8") as f:
+            first_line = f.readline().strip()
+            if first_line == ",".join(FIELDNAMES):
+                return  # Header matches current schema perfectly
+    except (OSError, UnicodeDecodeError) as ex:
+        logger.warning(f"Could not read existing CSV header: {ex}")
+        return  # Preserve file as-is on read error rather than overwriting
+
+    # Header mismatch detected — migrate existing rows to new FIELDNAMES schema safely
+    try:
+        backup_path = f"{TRADES_CSV}.bak"
+        with open(TRADES_CSV, "r", encoding="utf-8") as f_in:
+            old_rows = list(csv.DictReader(f_in))
+        
+        # Write backup file
+        with open(backup_path, "w", newline="", encoding="utf-8") as f_bak:
+            if old_rows:
+                old_keys = list(old_rows[0].keys())
+                w_bak = csv.DictWriter(f_bak, fieldnames=old_keys)
+                w_bak.writeheader()
+                w_bak.writerows(old_rows)
+        
+        # Migrate rows into new schema
+        migrated_rows = []
+        for r in old_rows:
+            new_r = {}
+            for col in FIELDNAMES:
+                if col in r:
+                    new_r[col] = r[col]
+                elif col == "entry_time":
+                    new_r[col] = r.get("timestamp", datetime.now().isoformat())
+                elif col == "exit_time":
+                    new_r[col] = r.get("timestamp", datetime.now().isoformat())
+                elif col == "exit_price":
+                    new_r[col] = r.get("tp", "0.0")
+                elif col == "risk_usd":
+                    new_r[col] = "5.0"
+                elif col == "planned_r":
+                    new_r[col] = "2.0"
+                elif col == "rule_followed":
+                    new_r[col] = "True"
+                elif col == "rule_break_notes":
+                    new_r[col] = ""
+                elif col == "r_multiple":
+                    risk = safe_float(r.get("risk_usd", 5.0))
+                    res = safe_float(r.get("result_usd", 0.0))
+                    new_r[col] = str(round(res / risk, 2)) if risk else "0.0"
+                else:
+                    new_r[col] = ""
+            migrated_rows.append(new_r)
+            
+        with open(TRADES_CSV, "w", newline="", encoding="utf-8") as f_out:
+            w = csv.DictWriter(f_out, fieldnames=FIELDNAMES)
+            w.writeheader()
+            w.writerows(migrated_rows)
+            
+        logger.info(f"Migrated {len(migrated_rows)} historical trade rows to current schema (backup saved to {backup_path})")
+    except Exception as ex:
+        logger.error(f"Failed to migrate legacy CSV file safely: {ex}")
+
+
 @app.post("/log-trade")
 def log_trade(t: Trade):
     """Append a fully detailed trade to the journal CSV. r_multiple is
@@ -255,22 +327,7 @@ def log_trade(t: Trade):
     eat_tz = timezone(timedelta(hours=3))
 
     with csv_lock:
-        new_file = not os.path.exists(TRADES_CSV)
-        header_matches = False
-        if not new_file:
-            try:
-                with open(TRADES_CSV, "r", encoding="utf-8") as f:
-                    first_line = f.readline().strip()
-                    if first_line == ",".join(FIELDNAMES):
-                        header_matches = True
-            except Exception as ex:
-                logger.warning(f"Could not read existing CSV header: {ex}")
-
-        if new_file or not header_matches:
-            with open(TRADES_CSV, "w", newline="", encoding="utf-8") as f:
-                w = csv.DictWriter(f, fieldnames=FIELDNAMES)
-                w.writeheader()
-
+        _ensure_csv_file()
         with open(TRADES_CSV, "a", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=FIELDNAMES)
             w.writerow({

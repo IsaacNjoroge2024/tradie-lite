@@ -208,6 +208,28 @@ def test_csv_sanitization():
     assert main._sanitize_csv_val("Normal text") == "Normal text"
 
 
+def test_csv_migration_preserves_old_records(mock_trades_csv):
+    # Write a legacy 9-column CSV file
+    legacy_header = "timestamp,direction,entry,sl,tp,setup,result_pips,result_usd,notes\n"
+    legacy_row = "2026-07-01T12:00:00,LONG,1.0800,1.0780,1.0840,Legacy Setup,40.0,4.0,Old Trade Note\n"
+    with open(mock_trades_csv, "w", encoding="utf-8") as f:
+        f.write(legacy_header)
+        f.write(legacy_row)
+        
+    # Trigger _ensure_csv_file
+    main._ensure_csv_file()
+    
+    # Verify backup exists and migrated CSV preserves legacy record under new FIELDNAMES schema
+    backup_path = f"{mock_trades_csv}.bak"
+    assert os.path.exists(backup_path)
+    
+    rows = main._load_trades()
+    assert len(rows) == 1
+    assert rows[0]["direction"] == "LONG"
+    assert rows[0]["result_usd"] == "4.0"
+    assert rows[0]["risk_usd"] == "5.0"
+
+
 @patch("main.requests.get")
 def test_forex_news_exception(mock_get):
     mock_get.side_effect = Exception("Connection Timeout")
