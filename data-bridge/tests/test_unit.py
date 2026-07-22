@@ -193,6 +193,20 @@ def test_trade_model_validation():
     with pytest.raises(ValidationError):
         main.Trade(**make_valid_payload(direction="SHORT", entry=1.0800, sl=1.0830, tp=1.0810))
 
+    # 9. Invalid risk_usd (<= 0)
+    with pytest.raises(ValidationError):
+        main.Trade(**make_valid_payload(risk_usd=-5.0))
+    with pytest.raises(ValidationError):
+        main.Trade(**make_valid_payload(risk_usd=0.0))
+
+
+def test_csv_sanitization():
+    assert main._sanitize_csv_val("=1+1") == "'=1+1"
+    assert main._sanitize_csv_val("+CMD") == "'+CMD"
+    assert main._sanitize_csv_val("-SUM()") == "'-SUM()"
+    assert main._sanitize_csv_val("@SUM()") == "'@SUM()"
+    assert main._sanitize_csv_val("Normal text") == "Normal text"
+
 
 @patch("main.requests.get")
 def test_forex_news_exception(mock_get):

@@ -1,8 +1,9 @@
-//@version=5
+//@version=6
 strategy("Tradie Lite Backtest — CRT+KillZone+FVG+VWAP", overlay=true,
      initial_capital=500, default_qty_type=strategy.percent_of_equity,
      default_qty_value=1, commission_type=strategy.commission.percent,
-     commission_value=0.0, slippage=2, max_bars_back=500)
+     commission_value=0.0, slippage=2, max_bars_back=500,
+     max_boxes_count=200, max_lines_count=200, process_orders_on_close=true)
 
 // ═══ INPUTS (identical to the live indicator, plus backtest-only params) ═══
 killZoneOnly = input.bool(true, "Only signal during kill zones")
@@ -73,22 +74,36 @@ sweepLow  = low  < recLow  and close > recLow
 plotshape(sweepHigh, "Sweep H", shape.xcross, location.abovebar, color.purple, size=size.small)
 plotshape(sweepLow,  "Sweep L", shape.xcross, location.belowbar, color.purple, size=size.small)
 
-// Track the sweep extreme for SL placement
+// Track the sweep extreme for SL placement (with recency tracking)
 var float lastSweepLowExtreme  = na
+var int   lastSweepLowBar      = na
 var float lastSweepHighExtreme = na
+var int   lastSweepHighBar     = na
+
 if sweepLow
     lastSweepLowExtreme := low
+    lastSweepLowBar     := bar_index
 if sweepHigh
     lastSweepHighExtreme := high
+    lastSweepHighBar     := bar_index
+
+sweepLowValid  = not na(lastSweepLowBar)  and (bar_index - lastSweepLowBar <= 30)
+sweepHighValid = not na(lastSweepHighBar) and (bar_index - lastSweepHighBar <= 30)
 
 // ═══ COMPOSITE SIGNAL (identical gating to the live indicator) ═══
 longSig  = killOk and bullBias and rsi > 45 and rsi < 68 and bullEqTouch and (bullBOS or sweepLow)
 shortSig = killOk and bearBias and rsi < 55 and rsi > 32 and bearEqTouch and (bearBOS or sweepHigh)
 
+if longSig
+    bullFVG_eq := na
+
+if shortSig
+    bearFVG_eq := na
+
 // ═══ SL/TP CALCULATION (mirrors the manual rule from TL-01: SL beyond
 //     sweep extreme, capped at maxSlPips; TP at plannedR x SL distance) ═══
-longSlPrice  = not na(lastSweepLowExtreme)  ? lastSweepLowExtreme - slBufferPips * pip : na
-shortSlPrice = not na(lastSweepHighExtreme) ? lastSweepHighExtreme + slBufferPips * pip : na
+longSlPrice  = sweepLowValid  ? lastSweepLowExtreme - slBufferPips * pip : na
+shortSlPrice = sweepHighValid ? lastSweepHighExtreme + slBufferPips * pip : na
 
 longSlPips  = not na(longSlPrice)  ? (close - longSlPrice) / pip  : na
 shortSlPips = not na(shortSlPrice) ? (shortSlPrice - close) / pip : na
@@ -109,3 +124,4 @@ if shortSig and shortSlOk and strategy.position_size == 0
 
 plotshape(longSig,  "LONG",  shape.labelup,   location.belowbar, color.green, text="BUY",  size=size.normal, textcolor=color.white)
 plotshape(shortSig, "SHORT", shape.labeldown, location.abovebar, color.red,   text="SELL", size=size.normal, textcolor=color.white)
+

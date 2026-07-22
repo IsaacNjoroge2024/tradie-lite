@@ -4,6 +4,7 @@ import json
 import time
 import logging
 import statistics
+import threading
 from collections import defaultdict
 import requests
 import yfinance as yf
@@ -26,6 +27,14 @@ app = FastAPI(title="Tradie Lite Data Bridge")
 FINNHUB_KEY = os.getenv("FINNHUB_API_KEY")
 YF_SYMBOL = os.getenv("YF_SYMBOL", "EURUSD=X")
 TRADES_CSV = os.path.join(os.path.dirname(__file__), "trades.csv")
+
+csv_lock = threading.Lock()
+
+
+def _sanitize_csv_val(val: str) -> str:
+    if isinstance(val, str) and val.startswith(("=", "+", "-", "@")):
+        return "'" + val
+    return val
 
 
 @app.get("/health")
@@ -213,7 +222,7 @@ class Trade(BaseModel):
             return "SELL"
         raise ValueError("direction must be 'BUY', 'SELL', 'LONG', or 'SHORT'")
 
-    @field_validator("entry", "sl", "tp", "exit_price")
+    @field_validator("entry", "sl", "tp", "exit_price", "risk_usd")
     @classmethod
     def validate_positive(cls, v: float) -> float:
         if v <= 0.0:
@@ -243,31 +252,46 @@ def log_trade(t: Trade):
     realized R, compared against planned_r (normally 2.0) to see if
     execution matched the plan."""
     r_multiple = round(t.result_usd / t.risk_usd, 2) if t.risk_usd else 0.0
-    new = not os.path.exists(TRADES_CSV)
     eat_tz = timezone(timedelta(hours=3))
-    with open(TRADES_CSV, "a", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=FIELDNAMES)
-        if new:
-            w.writeheader()
-        w.writerow({
-            "timestamp": datetime.now(eat_tz).isoformat(),
-            "entry_time": t.entry_time,
-            "exit_time": t.exit_time,
-            "direction": t.direction,
-            "entry": t.entry,
-            "sl": t.sl,
-            "tp": t.tp,
-            "exit_price": t.exit_price,
-            "result_pips": t.result_pips,
-            "result_usd": t.result_usd,
-            "risk_usd": t.risk_usd,
-            "r_multiple": r_multiple,
-            "planned_r": t.planned_r,
-            "setup": t.setup,
-            "rule_followed": t.rule_followed,
-            "rule_break_notes": t.rule_break_notes,
-            "notes": t.notes,
-        })
+
+    with csv_lock:
+        new_file = not os.path.exists(TRADES_CSV)
+        header_matches = False
+        if not new_file:
+            try:
+                with open(TRADES_CSV, "r", encoding="utf-8") as f:
+                    first_line = f.readline().strip()
+                    if first_line == ",".join(FIELDNAMES):
+                        header_matches = True
+            except Exception as ex:
+                logger.warning(f"Could not read existing CSV header: {ex}")
+
+        if new_file or not header_matches:
+            with open(TRADES_CSV, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=FIELDNAMES)
+                w.writeheader()
+
+        with open(TRADES_CSV, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=FIELDNAMES)
+            w.writerow({
+                "timestamp": datetime.now(eat_tz).isoformat(),
+                "entry_time": t.entry_time,
+                "exit_time": t.exit_time,
+                "direction": t.direction,
+                "entry": t.entry,
+                "sl": t.sl,
+                "tp": t.tp,
+                "exit_price": t.exit_price,
+                "result_pips": t.result_pips,
+                "result_usd": t.result_usd,
+                "risk_usd": t.risk_usd,
+                "r_multiple": r_multiple,
+                "planned_r": t.planned_r,
+                "setup": _sanitize_csv_val(t.setup),
+                "rule_followed": t.rule_followed,
+                "rule_break_notes": _sanitize_csv_val(t.rule_break_notes),
+                "notes": _sanitize_csv_val(t.notes),
+            })
     return {"logged": True, "r_multiple": r_multiple}
 
 
@@ -279,10 +303,11 @@ def safe_float(val):
 
 
 def _load_trades():
-    if not os.path.exists(TRADES_CSV):
-        return []
-    with open(TRADES_CSV, "r", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+    with csv_lock:
+        if not os.path.exists(TRADES_CSV):
+            return []
+        with open(TRADES_CSV, "r", encoding="utf-8") as f:
+            return list(csv.DictReader(f))
 
 
 @app.get("/journal-stats")
@@ -311,12 +336,16 @@ def journal_stats():
     # Win rate by hour of day (EAT), from entry_time
     by_hour = defaultdict(lambda: {"trades": 0, "wins": 0})
     by_weekday = defaultdict(lambda: {"trades": 0, "wins": 0})
+    eat_tz = timezone(timedelta(hours=3))
+
     for r in rows:
         entry_time_str = r.get("entry_time")
         if not entry_time_str:
             continue
         try:
             dt = datetime.fromisoformat(entry_time_str)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(eat_tz)
         except (ValueError, KeyError, TypeError):
             continue
         hour_key = f"{dt.hour:02d}:00"
