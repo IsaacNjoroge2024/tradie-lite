@@ -7,6 +7,7 @@ strategy("Tradie Lite Backtest — CRT+KillZone+FVG+VWAP", overlay=true,
 
 // ═══ INPUTS (identical to the live indicator, plus backtest-only params) ═══
 killZoneOnly = input.bool(true, "Only signal during kill zones")
+useCrtGate   = input.bool(false, "Require CRT breakout+reentry for signal (stricter)")
 struct_lb    = input.int(10, "Structure lookback", minval=1, maxval=500)
 sweep_lb     = input.int(20, "Liquidity sweep lookback", minval=1, maxval=500)
 slBufferPips = input.float(3.0, "SL buffer beyond sweep extreme (pips)")
@@ -23,6 +24,31 @@ inNY      = h >= 11 and h < 14
 inOverlap = h >= 12 and h < 15
 inKillZone = inLondon or inNY or inOverlap
 killOk = not killZoneOnly or inKillZone
+
+// ═══ H4 CRT RANGE (previous completed H4 candle) ═══
+[h4High, h4Low] = request.security(syminfo.tickerid, "240", [high[1], low[1]], lookahead=barmerge.lookahead_off)
+
+var line h4HighLine = na
+var line h4LowLine  = na
+var label h4HighLbl = na
+var label h4LowLbl  = na
+
+if barstate.islast
+    line.delete(h4HighLine)
+    line.delete(h4LowLine)
+    label.delete(h4HighLbl)
+    label.delete(h4LowLbl)
+    h4HighLine := line.new(bar_index - 100, h4High, bar_index + 20, h4High,
+         color=color.new(color.red, 20), width=1, style=line.style_dashed)
+    h4LowLine  := line.new(bar_index - 100, h4Low, bar_index + 20, h4Low,
+         color=color.new(color.lime, 20), width=1, style=line.style_dashed)
+    h4HighLbl := label.new(bar_index + 20, h4High, "CRT High " + str.tostring(h4High, "#.#####"),
+         color=color.new(color.red, 80), textcolor=color.red, style=label.style_none)
+    h4LowLbl  := label.new(bar_index + 20, h4Low, "CRT Low " + str.tostring(h4Low, "#.#####"),
+         color=color.new(color.lime, 80), textcolor=color.lime, style=label.style_none)
+
+crtSweepHigh = high > h4High and close < h4High
+crtSweepLow  = low  < h4Low  and close > h4Low
 
 // ═══ EMA + VWAP BIAS ═══
 ema9  = ta.ema(close, 9)
@@ -91,8 +117,8 @@ sweepLowValid  = not na(lastSweepLowBar)  and (bar_index - lastSweepLowBar <= 30
 sweepHighValid = not na(lastSweepHighBar) and (bar_index - lastSweepHighBar <= 30)
 
 // ═══ COMPOSITE SIGNAL (identical gating to the live indicator) ═══
-longSig  = killOk and bullBias and rsi > 45 and rsi < 68 and bullEqTouch and (bullBOS or sweepLow)
-shortSig = killOk and bearBias and rsi < 55 and rsi > 32 and bearEqTouch and (bearBOS or sweepHigh)
+longSig  = killOk and bullBias and rsi > 45 and rsi < 68 and bullEqTouch and (bullBOS or sweepLow) and (not useCrtGate or crtSweepLow)
+shortSig = killOk and bearBias and rsi < 55 and rsi > 32 and bearEqTouch and (bearBOS or sweepHigh) and (not useCrtGate or crtSweepHigh)
 
 if longSig
     bullFVG_eq := na
@@ -124,4 +150,3 @@ if shortSig and shortSlOk and strategy.position_size == 0
 
 plotshape(longSig,  "LONG",  shape.labelup,   location.belowbar, color.green, text="BUY",  size=size.normal, textcolor=color.white)
 plotshape(shortSig, "SHORT", shape.labeldown, location.abovebar, color.red,   text="SELL", size=size.normal, textcolor=color.white)
-
