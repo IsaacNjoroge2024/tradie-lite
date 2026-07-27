@@ -139,37 +139,95 @@ def test_forex_news(mock_get):
 
 
 def test_trade_model_validation():
-    # 1. Valid LONG trade
-    t_long = main.Trade(direction="LONG", entry=1.0850, sl=1.0825, tp=1.0900, setup="FVG")
-    assert t_long.direction == "LONG"
+    # Helper to construct valid base payload
+    def make_valid_payload(**kwargs):
+        payload = {
+            "entry_time": "2026-07-02T10:00:00+03:00",
+            "exit_time": "2026-07-02T10:30:00+03:00",
+            "direction": "LONG",
+            "entry": 1.0850,
+            "sl": 1.0825,
+            "tp": 1.0900,
+            "exit_price": 1.0900,
+            "result_pips": 50.0,
+            "result_usd": 5.0,
+            "risk_usd": 5.0,
+            "planned_r": 2.0,
+            "setup": "FVG",
+            "rule_followed": True,
+            "rule_break_notes": "",
+            "notes": ""
+        }
+        payload.update(kwargs)
+        return payload
+
+    # 1. Valid LONG/BUY trade
+    t_long = main.Trade(**make_valid_payload(direction="LONG", entry=1.0850, sl=1.0825, tp=1.0900))
+    assert t_long.direction == "BUY"
     
-    # 2. Valid SHORT trade
-    t_short = main.Trade(direction="SHORT", entry=1.0800, sl=1.0830, tp=1.0740, setup="Sweep")
-    assert t_short.direction == "SHORT"
+    # 2. Valid SHORT/SELL trade
+    t_short = main.Trade(**make_valid_payload(direction="SHORT", entry=1.0800, sl=1.0830, tp=1.0740, exit_price=1.0740))
+    assert t_short.direction == "SELL"
     
     # 3. Invalid direction
     with pytest.raises(ValidationError):
-        main.Trade(direction="UP", entry=1.0850, sl=1.0825, tp=1.0900, setup="FVG")
+        main.Trade(**make_valid_payload(direction="UP"))
         
     # 4. Negative values
     with pytest.raises(ValidationError):
-        main.Trade(direction="LONG", entry=-1.0850, sl=1.0825, tp=1.0900, setup="FVG")
+        main.Trade(**make_valid_payload(entry=-1.0850))
         
     # 5. Invalid LONG SL (SL >= entry)
     with pytest.raises(ValidationError):
-        main.Trade(direction="LONG", entry=1.0850, sl=1.0860, tp=1.0900, setup="FVG")
+        main.Trade(**make_valid_payload(direction="LONG", entry=1.0850, sl=1.0860, tp=1.0900))
         
     # 6. Invalid LONG TP (TP <= entry)
     with pytest.raises(ValidationError):
-        main.Trade(direction="LONG", entry=1.0850, sl=1.0825, tp=1.0840, setup="FVG")
+        main.Trade(**make_valid_payload(direction="LONG", entry=1.0850, sl=1.0825, tp=1.0840))
         
     # 7. Invalid SHORT SL (SL <= entry)
     with pytest.raises(ValidationError):
-        main.Trade(direction="SHORT", entry=1.0800, sl=1.0790, tp=1.0740, setup="Sweep")
+        main.Trade(**make_valid_payload(direction="SHORT", entry=1.0800, sl=1.0790, tp=1.0740))
         
     # 8. Invalid SHORT TP (TP >= entry)
     with pytest.raises(ValidationError):
-        main.Trade(direction="SHORT", entry=1.0800, sl=1.0830, tp=1.0810, setup="Sweep")
+        main.Trade(**make_valid_payload(direction="SHORT", entry=1.0800, sl=1.0830, tp=1.0810))
+
+    # 9. Invalid risk_usd (<= 0)
+    with pytest.raises(ValidationError):
+        main.Trade(**make_valid_payload(risk_usd=-5.0))
+    with pytest.raises(ValidationError):
+        main.Trade(**make_valid_payload(risk_usd=0.0))
+
+
+def test_csv_sanitization():
+    assert main._sanitize_csv_val("=1+1") == "'=1+1"
+    assert main._sanitize_csv_val("+CMD") == "'+CMD"
+    assert main._sanitize_csv_val("-SUM()") == "'-SUM()"
+    assert main._sanitize_csv_val("@SUM()") == "'@SUM()"
+    assert main._sanitize_csv_val("Normal text") == "Normal text"
+
+
+def test_csv_migration_preserves_old_records(mock_trades_csv):
+    # Write a legacy 9-column CSV file
+    legacy_header = "timestamp,direction,entry,sl,tp,setup,result_pips,result_usd,notes\n"
+    legacy_row = "2026-07-01T12:00:00,LONG,1.0800,1.0780,1.0840,Legacy Setup,40.0,4.0,Old Trade Note\n"
+    with open(mock_trades_csv, "w", encoding="utf-8") as f:
+        f.write(legacy_header)
+        f.write(legacy_row)
+        
+    # Trigger _ensure_csv_file
+    main._ensure_csv_file()
+    
+    # Verify backup exists and migrated CSV preserves legacy record under new FIELDNAMES schema
+    backup_path = f"{mock_trades_csv}.bak"
+    assert os.path.exists(backup_path)
+    
+    rows = main._load_trades()
+    assert len(rows) == 1
+    assert rows[0]["direction"] == "LONG"
+    assert rows[0]["result_usd"] == "4.0"
+    assert rows[0]["risk_usd"] == "5.0"
 
 
 @patch("main.requests.get")
@@ -200,3 +258,91 @@ def test_economic_calendar_skips_malformed_date(mock_get):
         assert res["date"] == today_str
         assert len(res["all_today"]) == 1
         assert res["all_today"][0]["event"] == "Valid Event"
+
+
+def test_journal_stats_calculations():
+    mock_trades = [
+        # Win, rule followed, Monday, 10:00
+        {
+            "timestamp": "2026-07-13T10:00:00",
+            "entry_time": "2026-07-13T10:00:00+03:00",
+            "exit_time": "2026-07-13T10:30:00+03:00",
+            "direction": "BUY",
+            "entry": "1.0850",
+            "sl": "1.0825",
+            "tp": "1.0900",
+            "exit_price": "1.0900",
+            "result_pips": "50.0",
+            "result_usd": "5.0",
+            "risk_usd": "5.0",
+            "r_multiple": "1.0",
+            "planned_r": "2.0",
+            "setup": "FVG",
+            "rule_followed": "True",
+            "rule_break_notes": "",
+            "notes": ""
+        },
+        # Loss, rule broken, Monday, 15:00
+        {
+            "timestamp": "2026-07-13T15:00:00",
+            "entry_time": "2026-07-13T15:00:00+03:00",
+            "exit_time": "2026-07-13T15:15:00+03:00",
+            "direction": "SELL",
+            "entry": "1.0800",
+            "sl": "1.0830",
+            "tp": "1.0740",
+            "exit_price": "1.0830",
+            "result_pips": "-30.0",
+            "result_usd": "-3.0",
+            "risk_usd": "5.0",
+            "r_multiple": "-0.6",
+            "planned_r": "2.0",
+            "setup": "Sweep",
+            "rule_followed": "False",
+            "rule_break_notes": "entered late",
+            "notes": ""
+        }
+    ]
+    with patch("main._load_trades", return_value=mock_trades):
+        stats = main.journal_stats()
+        assert stats["trades"] == 2
+        assert stats["wins"] == 1
+        assert stats["losses"] == 1
+        assert stats["win_rate"] == 50.0
+        assert stats["total_usd"] == 2.0
+        assert stats["average_r"] == 0.2
+        assert stats["rule_followed_trades"] == 1
+        assert stats["rule_followed_usd"] == 5.0
+        assert stats["rule_broken_trades"] == 1
+        assert stats["rule_broken_usd"] == -3.0
+        assert stats["discipline_cost_usd"] == 8.0
+        assert "10:00" in stats["win_rate_by_hour_eat"]
+        assert "15:00" in stats["win_rate_by_hour_eat"]
+        assert "Monday" in stats["win_rate_by_weekday"]
+
+
+def test_weekly_review_filtering():
+    eat_tz = dt.timezone(dt.timedelta(hours=3))
+    now = dt.datetime.now(eat_tz)
+    
+    mock_trades = [
+        # Loss within 7 days
+        {
+            "exit_time": (now - dt.timedelta(days=2)).isoformat(),
+            "result_usd": "-3.0"
+        },
+        # Loss older than 7 days
+        {
+            "exit_time": (now - dt.timedelta(days=10)).isoformat(),
+            "result_usd": "-2.0"
+        },
+        # Win within 7 days (should be ignored since it's a win)
+        {
+            "exit_time": (now - dt.timedelta(days=1)).isoformat(),
+            "result_usd": "5.0"
+        }
+    ]
+    with patch("main._load_trades", return_value=mock_trades):
+        review = main.weekly_review()
+        assert review["count"] == 1
+        assert review["losing_trades"][0]["result_usd"] == "-3.0"

@@ -3,6 +3,9 @@ import csv
 import json
 import time
 import logging
+import statistics
+import threading
+from collections import defaultdict
 import requests
 import yfinance as yf
 from datetime import datetime, timedelta, timezone
@@ -24,6 +27,14 @@ app = FastAPI(title="Tradie Lite Data Bridge")
 FINNHUB_KEY = os.getenv("FINNHUB_API_KEY")
 YF_SYMBOL = os.getenv("YF_SYMBOL", "EURUSD=X")
 TRADES_CSV = os.path.join(os.path.dirname(__file__), "trades.csv")
+
+csv_lock = threading.Lock()
+
+
+def _sanitize_csv_val(val: str) -> str:
+    if isinstance(val, str) and val.startswith(("=", "+", "-", "@")):
+        return "'" + val
+    return val
 
 
 @app.get("/health")
@@ -177,25 +188,41 @@ def current_session():
             "tradeable": zone != "OUTSIDE_KILLZONE"}
 
 
+FIELDNAMES = [
+    "timestamp", "entry_time", "exit_time", "direction", "entry", "sl", "tp",
+    "exit_price", "result_pips", "result_usd", "risk_usd", "r_multiple",
+    "planned_r", "setup", "rule_followed", "rule_break_notes", "notes",
+]
+
+
 class Trade(BaseModel):
+    entry_time: str
+    exit_time: str
     direction: str
     entry: float
     sl: float
     tp: float
+    exit_price: float
+    result_pips: float
+    result_usd: float
+    risk_usd: float = 5.0
+    planned_r: float = 2.0
     setup: str
-    result_pips: float = 0.0
-    result_usd: float = 0.0
+    rule_followed: bool
+    rule_break_notes: str = ""
     notes: str = ""
 
     @field_validator("direction")
     @classmethod
     def validate_direction(cls, v: str) -> str:
         d = v.upper().strip()
-        if d not in ("LONG", "SHORT"):
-            raise ValueError("direction must be 'LONG' or 'SHORT'")
-        return d
+        if d in ("LONG", "BUY"):
+            return "BUY"
+        elif d in ("SHORT", "SELL"):
+            return "SELL"
+        raise ValueError("direction must be 'BUY', 'SELL', 'LONG', or 'SHORT'")
 
-    @field_validator("entry", "sl", "tp")
+    @field_validator("entry", "sl", "tp", "exit_price", "risk_usd")
     @classmethod
     def validate_positive(cls, v: float) -> float:
         if v <= 0.0:
@@ -204,33 +231,125 @@ class Trade(BaseModel):
 
     @model_validator(mode="after")
     def validate_trade_relationships(self) -> 'Trade':
-        direction = self.direction.upper()
-        if direction == "LONG":
+        direction = self.direction.upper().strip()
+        if direction in ("LONG", "BUY"):
             if self.sl >= self.entry:
-                raise ValueError("For LONG trade, Stop Loss must be less than Entry price")
+                raise ValueError("For BUY/LONG trade, Stop Loss must be less than Entry price")
             if self.tp <= self.entry:
-                raise ValueError("For LONG trade, Take Profit must be greater than Entry price")
-        elif direction == "SHORT":
+                raise ValueError("For BUY/LONG trade, Take Profit must be greater than Entry price")
+        elif direction in ("SHORT", "SELL"):
             if self.sl <= self.entry:
-                raise ValueError("For SHORT trade, Stop Loss must be greater than Entry price")
+                raise ValueError("For SELL/SHORT trade, Stop Loss must be greater than Entry price")
             if self.tp >= self.entry:
-                raise ValueError("For SHORT trade, Take Profit must be less than Entry price")
+                raise ValueError("For SELL/SHORT trade, Take Profit must be less than Entry price")
         return self
+
+
+def _ensure_csv_file():
+    """Ensure TRADES_CSV exists with current FIELDNAMES header. If an older
+    CSV with different headers is found, back it up and migrate existing rows
+    to the new schema without deleting any historical trade data."""
+    if not os.path.exists(TRADES_CSV):
+        with open(TRADES_CSV, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=FIELDNAMES)
+            w.writeheader()
+        return
+
+    try:
+        with open(TRADES_CSV, "r", encoding="utf-8") as f:
+            first_line = f.readline().strip()
+            if first_line == ",".join(FIELDNAMES):
+                return  # Header matches current schema perfectly
+    except (OSError, UnicodeDecodeError) as ex:
+        logger.warning(f"Could not read existing CSV header: {ex}")
+        return  # Preserve file as-is on read error rather than overwriting
+
+    # Header mismatch detected — migrate existing rows to new FIELDNAMES schema safely
+    try:
+        backup_path = f"{TRADES_CSV}.bak"
+        with open(TRADES_CSV, "r", encoding="utf-8") as f_in:
+            old_rows = list(csv.DictReader(f_in))
+        
+        # Write backup file
+        with open(backup_path, "w", newline="", encoding="utf-8") as f_bak:
+            if old_rows:
+                old_keys = list(old_rows[0].keys())
+                w_bak = csv.DictWriter(f_bak, fieldnames=old_keys)
+                w_bak.writeheader()
+                w_bak.writerows(old_rows)
+        
+        # Migrate rows into new schema
+        migrated_rows = []
+        for r in old_rows:
+            new_r = {}
+            for col in FIELDNAMES:
+                if col in r:
+                    new_r[col] = r[col]
+                elif col == "entry_time":
+                    new_r[col] = r.get("timestamp", datetime.now().isoformat())
+                elif col == "exit_time":
+                    new_r[col] = r.get("timestamp", datetime.now().isoformat())
+                elif col == "exit_price":
+                    new_r[col] = r.get("tp", "0.0")
+                elif col == "risk_usd":
+                    new_r[col] = "5.0"
+                elif col == "planned_r":
+                    new_r[col] = "2.0"
+                elif col == "rule_followed":
+                    new_r[col] = "True"
+                elif col == "rule_break_notes":
+                    new_r[col] = ""
+                elif col == "r_multiple":
+                    risk = safe_float(r.get("risk_usd", 5.0))
+                    res = safe_float(r.get("result_usd", 0.0))
+                    new_r[col] = str(round(res / risk, 2)) if risk else "0.0"
+                else:
+                    new_r[col] = ""
+            migrated_rows.append(new_r)
+            
+        with open(TRADES_CSV, "w", newline="", encoding="utf-8") as f_out:
+            w = csv.DictWriter(f_out, fieldnames=FIELDNAMES)
+            w.writeheader()
+            w.writerows(migrated_rows)
+            
+        logger.info(f"Migrated {len(migrated_rows)} historical trade rows to current schema (backup saved to {backup_path})")
+    except Exception as ex:
+        logger.error(f"Failed to migrate legacy CSV file safely: {ex}")
 
 
 @app.post("/log-trade")
 def log_trade(t: Trade):
-    """Append a trade to the journal CSV."""
-    new = not os.path.exists(TRADES_CSV)
+    """Append a fully detailed trade to the journal CSV. r_multiple is
+    computed automatically from result_usd / risk_usd — this is the
+    realized R, compared against planned_r (normally 2.0) to see if
+    execution matched the plan."""
+    r_multiple = round(t.result_usd / t.risk_usd, 2) if t.risk_usd else 0.0
     eat_tz = timezone(timedelta(hours=3))
-    with open(TRADES_CSV, "a", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        if new:
-            w.writerow(["timestamp", "direction", "entry", "sl", "tp",
-                        "setup", "result_pips", "result_usd", "notes"])
-        w.writerow([datetime.now(eat_tz).isoformat(), t.direction, t.entry, t.sl,
-                    t.tp, t.setup, t.result_pips, t.result_usd, t.notes])
-    return {"logged": True}
+
+    with csv_lock:
+        _ensure_csv_file()
+        with open(TRADES_CSV, "a", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=FIELDNAMES)
+            w.writerow({
+                "timestamp": datetime.now(eat_tz).isoformat(),
+                "entry_time": t.entry_time,
+                "exit_time": t.exit_time,
+                "direction": t.direction,
+                "entry": t.entry,
+                "sl": t.sl,
+                "tp": t.tp,
+                "exit_price": t.exit_price,
+                "result_pips": t.result_pips,
+                "result_usd": t.result_usd,
+                "risk_usd": t.risk_usd,
+                "r_multiple": r_multiple,
+                "planned_r": t.planned_r,
+                "setup": _sanitize_csv_val(t.setup),
+                "rule_followed": t.rule_followed,
+                "rule_break_notes": _sanitize_csv_val(t.rule_break_notes),
+                "notes": _sanitize_csv_val(t.notes),
+            })
+    return {"logged": True, "r_multiple": r_multiple}
 
 
 def safe_float(val):
@@ -240,21 +359,112 @@ def safe_float(val):
         return 0.0
 
 
+def _load_trades():
+    with csv_lock:
+        if not os.path.exists(TRADES_CSV):
+            return []
+        with open(TRADES_CSV, "r", encoding="utf-8") as f:
+            return list(csv.DictReader(f))
+
+
 @app.get("/journal-stats")
 def journal_stats():
-    """Quick P&L summary from the journal."""
-    if not os.path.exists(TRADES_CSV):
-        return {"trades": 0, "wins": 0, "win_rate": 0.0, "total_usd": 0.0}
-        
-    with open(TRADES_CSV, "r", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
-        
+    """Full journal analytics: win rate, average R (expected value),
+    rule-break P&L split, win rate by hour of day, win rate by weekday."""
+    rows = _load_trades()
     if not rows:
         return {"trades": 0, "wins": 0, "win_rate": 0.0, "total_usd": 0.0}
-        
+
+    total = len(rows)
     wins = [r for r in rows if safe_float(r.get("result_usd")) > 0]
+    losses = [r for r in rows if safe_float(r.get("result_usd")) <= 0]
+    r_values = [safe_float(r.get("r_multiple")) for r in rows]
     total_usd = sum(safe_float(r.get("result_usd")) for r in rows)
-    
-    return {"trades": len(rows), "wins": len(wins),
-            "win_rate": round(len(wins) / len(rows) * 100, 1),
-            "total_usd": round(total_usd, 2)}
+
+    # Expected value (average R)
+    average_r = round(statistics.mean(r_values), 2) if r_values else 0.0
+
+    # Rule-break P&L split — isolates the cost of indiscipline
+    followed = [r for r in rows if r.get("rule_followed") in ("True", "true", True)]
+    broken = [r for r in rows if r.get("rule_followed") in ("False", "false", False)]
+    followed_usd = round(sum(safe_float(r.get("result_usd")) for r in followed), 2)
+    broken_usd = round(sum(safe_float(r.get("result_usd")) for r in broken), 2)
+
+    # Win rate by hour of day (EAT), from entry_time
+    by_hour = defaultdict(lambda: {"trades": 0, "wins": 0})
+    by_weekday = defaultdict(lambda: {"trades": 0, "wins": 0})
+    eat_tz = timezone(timedelta(hours=3))
+
+    for r in rows:
+        entry_time_str = r.get("entry_time")
+        if not entry_time_str:
+            continue
+        try:
+            dt = datetime.fromisoformat(entry_time_str)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(eat_tz)
+        except (ValueError, KeyError, TypeError):
+            continue
+        hour_key = f"{dt.hour:02d}:00"
+        weekday_key = dt.strftime("%A")
+        won = safe_float(r.get("result_usd")) > 0
+        by_hour[hour_key]["trades"] += 1
+        by_hour[hour_key]["wins"] += 1 if won else 0
+        by_weekday[weekday_key]["trades"] += 1
+        by_weekday[weekday_key]["wins"] += 1 if won else 0
+
+    win_rate_by_hour = {
+        h: {"trades": v["trades"], "wins": v["wins"],
+            "win_rate": round(v["wins"] / v["trades"] * 100, 1)}
+        for h, v in sorted(by_hour.items())
+    }
+    win_rate_by_weekday = {
+        d: {"trades": v["trades"], "wins": v["wins"],
+            "win_rate": round(v["wins"] / v["trades"] * 100, 1)}
+        for d, v in by_weekday.items()
+    }
+
+    return {
+        "trades": total,
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate": round(len(wins) / total * 100, 1),
+        "total_usd": round(total_usd, 2),
+        "average_r": average_r,
+        "planned_r_target": safe_float(rows[0].get("planned_r")) if rows else 2.0,
+        "rule_followed_trades": len(followed),
+        "rule_followed_usd": followed_usd,
+        "rule_broken_trades": len(broken),
+        "rule_broken_usd": broken_usd,
+        "discipline_cost_usd": round(followed_usd - broken_usd if broken else 0.0, 2),
+        "win_rate_by_hour_eat": win_rate_by_hour,
+        "win_rate_by_weekday": win_rate_by_weekday,
+    }
+
+
+@app.get("/weekly-review")
+def weekly_review():
+    """Losing trades from the last 7 days — the raw material for the
+    Sunday review habit. Returns them with rule-break flags so you can
+    see at a glance whether losses came from bad setups or broken rules."""
+    rows = _load_trades()
+    eat_tz = timezone(timedelta(hours=3))
+    cutoff = datetime.now(eat_tz) - timedelta(days=7)
+    recent_losses = []
+    for r in rows:
+        exit_time_str = r.get("exit_time")
+        if not exit_time_str:
+            continue
+        try:
+            exit_dt = datetime.fromisoformat(exit_time_str)
+            if exit_dt.tzinfo is None:
+                exit_dt = exit_dt.replace(tzinfo=eat_tz)
+        except (ValueError, KeyError, TypeError):
+            continue
+        if exit_dt >= cutoff and safe_float(r.get("result_usd")) <= 0:
+            recent_losses.append(r)
+    return {
+        "period": "last_7_days",
+        "losing_trades": recent_losses,
+        "count": len(recent_losses),
+    }
